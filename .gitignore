@@ -1,0 +1,16 @@
+.vs/
+.vscode/
+Debug/
+Release/
+x64/
+x86/
+build/
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.user
+*.suo
