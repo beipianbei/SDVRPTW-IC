@@ -14,3 +14,5 @@ build/
 *.ilk
 *.user
 *.suo
+/Program/main(生成exe专用).cpp
+/Program/main原始.cpp
