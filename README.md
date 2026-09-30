@@ -1,79 +1,94 @@
-[README.md](https://github.com/user-attachments/files/31948546/README.md)
-# RLGHGS for SDVRPTW-IC
+# RLHGS for SDVRPTW-IC
 
-A C++ implementation of **RLGHGS** (Reinforcement Learning Guided Hybrid Genetic Search) for the **Split Delivery Vehicle Routing Problem with Time Windows and Commodity Incompatibility (SDVRPTW-IC)** — a rich VRP variant motivated by the commodities transportation system of a large petrochemical group.
+This repository contains a C++17 implementation of **RLHGS** (reinforcement-learning-guided hybrid genetic search) for the **Split Delivery Vehicle Routing Problem with Time Windows and Commodity Incompatibility (SDVRPTW-IC)**.
 
-This repository contains the source code of the algorithm described in our paper. The framework is built upon the **HGS-CVRP** algorithm of [Vidal (2022)](https://github.com/vidalt/HGS-CVRP) (Hybrid Genetic Search, MIT License), extended with demand pre-splitting, a reinforcement-learning-guided search mechanism, and hard commodity-incompatibility constraints.
+SDVRPTW-IC extends vehicle routing with three practical requirements:
 
----
+- **Split delivery:** the demand of an original customer may be served by more than one vehicle.
+- **Hard time windows:** service must start within the specified customer time window; early arrivals may wait.
+- **Commodity incompatibility:** incompatible commodity types cannot be transported by the same vehicle, while compatible commodities may share a vehicle.
 
-## 1. Problem Description
+The objective is to minimize total two-decimal Euclidean routing distance while satisfying exact original demand, vehicle capacity, time-window, service-time, depot, and commodity-compatibility constraints.
 
-The SDVRPTW-IC is defined on a directed graph $G=(V,A)$, where node $0$ is the depot and $N=\{1,\dots,n\}$ is the customer set. It jointly considers three practical features:
+The current frozen algorithm version reported at startup is:
 
-- **Split deliveries (SD)** — a customer's demand may be fulfilled by multiple vehicles (unavoidable when demand exceeds vehicle capacity).
-- **Time windows (TW)** — service at customer $i$ must start within $[e_i, l_i]$; early arrivals wait.
-- **Commodity incompatibility (CI)** — each customer requests one commodity type; conflicting type pairs $(g,g')\in H$ cannot be loaded on the same vehicle. This is enforced by a conflict customer-pair set $P$ derived from $H$.
-
-**Objective:** minimize the total transportation cost (distance) of all vehicle routes such that every customer's demand is fully delivered, all time windows are respected, vehicle capacity is never exceeded, and no two conflicting commodities share a vehicle.
-
-A mixed-integer programming formulation is given in the paper; small instances can be solved to optimality with Gurobi as a benchmark.
-
-## 2. Algorithm Overview
-
-RLGHGS keeps the population-based "genetic algorithm + local search" framework of HGS, and adds the following components:
-
-1. **PASA — Prior Adaptive Splitting Algorithm** (`main.cpp`, `splitDemand` / `Split_Node`).
-   Before the genetic search starts, each customer's demand is decomposed once into feasible loads that never exceed vehicle capacity. A greatest-common-divisor benchmark of all demands and the capacity defines a normalized unit; a geometric-series strategy (base 2) generates a descending sequence of split ratios, applied greedily; residual demand is covered by unit loads so that splits always sum exactly to the original demand. Every resulting load becomes a *virtual customer* inheriting the original coordinates, time window, and service time. E.g., capacity 100 and demand 76 → 64 + 8 + 4. The routing algorithm then treats virtual customers independently, realizing split delivery.
-
-2. **Constructive heuristic for initial solutions** (adapted from Penna et al., 2013).
-   The number of routes is estimated from aggregate demand; each route is seeded with the earliest-time-window customer; remaining customers are greedily inserted at the feasible position of least marginal cost, skipping any route that would create a commodity conflict.
-
-3. **Reinforcement-learning-guided evolution.**
-   A probability matrix records each customer's preference over possible successors and is updated by reward/penalty signals collected during neighborhood search (with a forgetting and smoothing mechanism to avoid premature convergence). This learning signal guides parent generation and crossover toward promising routing regions while preserving diversity. Parent selection combines the standard binary tournament selection (BTS) with learning-guided construction; offspring are produced by **OX crossover** (`Genetic.cpp`, `crossoverOX`) and completed by the **Split** procedure.
-
-4. **VNSa — Variable Neighborhood Search with SWAP\*** (`LocalSearch.cpp`).
-   Each offspring is refined by the two-stage local search of Vidal (2022): route improvement (RI) with nine move operators (relocations, swaps, 2-Opt / 2-Opt* variants M1–M9), restricted to granular neighborhoods of the $\Gamma$ geographically closest customers, plus the **SWAP\*** operator that exchanges two customers between routes at their best insertion positions.
-
-5. **Strict feasibility for commodity conflicts.**
-   A binary conflict matrix is built at instance-loading time (`InstanceCVRPLIB.cpp`) and consulted both by the Split procedure (`Split.cpp`) and by every neighborhood move (`LocalSearch.cpp`): any move that would place incompatible commodities on the same vehicle is rejected outright.
-
-Population management (biased fitness balancing cost and diversity, survivor selection, adaptive penalty management, restarts) follows the original HGS design (`Population.cpp`, `Individual.cpp`).
-
-## 3. Repository Structure
-
-```
-Program/
-├── main.cpp                 Entry point; PASA demand pre-splitting (splitDemand, Split_Node); instance solving driver
-├── Genetic.{h,cpp}          Genetic algorithm loop and OX crossover
-├── Population.{h,cpp}       Population management, binary tournament, biased fitness, solution export
-├── Individual.{h,cpp}       Solution (individual) representation and evaluation
-├── LocalSearch.{h,cpp}      VNSa local search: RI moves (M1–M9) and SWAP*, with commodity-conflict checks
-├── Split.{h,cpp}            Giant-tour Split procedure (feasible route extraction with conflict checks)
-├── Params.{h,cpp}           Problem data and evaluation structures
-├── InstanceCVRPLIB.{h,cpp}  Instance reader (extended CVRPLIB format, incl. commodity types & TYPE_CONFLICT)
-├── AlgorithmParameters.{h,cpp}  Default algorithm parameters
-├── commandline.h            Command-line argument parsing
-├── C_Interface.{h,cpp}      C interface wrappers
-└── CircleSector.h           Geometry utilities for route-sector tracking
+```text
+Version=FINAL_DR_V1_CAP30_FIX
+Objective=TWO_DECIMAL_EUCLIDEAN
+SplitStrategy=CURRENT_RLHGS
+WarmFraction=0.5
+DRTrigger=500
+DRRemovalRatio=0.15
 ```
 
-Test instances live in `../Instances/`:
+## 1. Algorithm overview
 
+The implementation retains the population-based genetic search, ordered crossover, local search, diversity management, adaptive penalties, and restart mechanism of HGS-CVRP, and extends that framework with the following SDVRPTW-IC components.
+
+1. **Split-aware representation.** Original-customer demand is mapped to quantity-carrying pseudo-customers while retaining the correspondence between every piece and its original customer. The formal configuration uses `CURRENT_RLHGS` splitting.
+2. **No-split warm start.** When every original demand fits within vehicle capacity, an initial no-split HGS phase supplies a seed to the split-enabled main search. If `maxOriginalDemand > capacity`, this phase is structurally impossible and is skipped automatically; the split-enabled search then starts at time zero.
+3. **Adaptive large-neighborhood search.** The A6 configuration activates the implemented ALNS intensification/diversification path within the HGS search.
+4. **Successor-learning guidance.** Search information on promising customer-successor relations is retained and used as guidance without replacing the standard HGS population framework.
+5. **Stagnation-triggered destroy--repair.** During the main HGS stage, related original-customer service blocks are removed across routes and reinserted by regret-2 repair, followed by the existing HGS local search. A reconstructed candidate enters the population only after validation. If no feasible parent is available, the trigger is skipped and HGS continues.
+6. **Independent validation.** Final candidates are recomputed from scratch and checked for exact demand, positive delivered quantities, capacity, hard time windows, service propagation, commodity conflicts, duplicate original-customer visits within a route, depot feasibility, and objective consistency.
+
+The repository also contains isolated diagnostic implementations for adaptive resplitting, joint resplitting, bounded-uphill dynamic local search, dynamic elite, historical-solution reevaluation, and trajectory auditing. These paths are disabled unless their corresponding command-line switches are explicitly supplied; they are not part of the formal command shown below.
+
+## 2. Repository structure
+
+```text
+SDVRPTW-IC/
+├── Program/
+│   ├── main.cpp                         Program entry point and experiment driver
+│   ├── Genetic.{h,cpp}                  HGS genetic-search loop and OX crossover
+│   ├── Population.{h,cpp}               Population, diversity, survivor selection, output
+│   ├── Individual.{h,cpp}               Fixed and dynamic solution representations
+│   ├── LocalSearch.{h,cpp}              HGS local-search neighborhoods and SWAP*
+│   ├── Split.{h,cpp}                    Giant-tour route partitioning
+│   ├── DemandSplit.{h,cpp}              Demand-splitting strategies and diagnostics
+│   ├── AdaptiveLNS.{h,cpp}              Adaptive large-neighborhood search
+│   ├── MinimalDestroyRepair.{h,cpp}      Related destroy and regret-2 repair
+│   ├── SolutionValidator.{h,cpp}         Independent from-scratch validator
+│   ├── Params.{h,cpp}                   Problem data and search state
+│   ├── InstanceCVRPLIB.{h,cpp}          Extended instance reader
+│   ├── AlgorithmParameters.{h,cpp}       Algorithm parameter definitions
+│   ├── AdaptiveResplitting.{h,cpp}       Dynamic resplitting diagnostics
+│   ├── JointResplitting.{h,cpp}          Two-customer joint-resplitting diagnostics
+│   ├── DynamicLocalImprove.{h,cpp}       Dynamic-quantity local improvement
+│   ├── BoundedUphillDynamicLS.{h,cpp}    Bounded bridge-search diagnostics
+│   ├── DynamicElite.{h,cpp}              Isolated dynamic side-elite path
+│   ├── OldSolutionReevaluation.{h,cpp}   Read-only historical-solution reevaluation
+│   ├── DistanceUtils.h                   Two-decimal Euclidean distance utilities
+│   ├── NumericFormat.h                   Stable numerical output formatting
+│   ├── commandline.h                     Command-line parsing
+│   └── C_Interface.{h,cpp}               C-compatible interface
+├── Instances/
+├── LICENSE
+└── README.md
 ```
+
+The two local development backups `main(生成exe专用).cpp` and `main原始.cpp` are intentionally excluded from this repository. `Program/main.cpp` is the authoritative entry point.
+
+## 3. Instance data
+
+The supplied instances are organized as follows:
+
+```text
 Instances/
-├── SDVRPTW/                 Base split-delivery VRPTW instances (25 / 50 / 100 customers, various capacities)
-├── SDVRPTW(M)/              Instances with commodity types attached to demands
-└── SDVRPTW(M-5-100)/        Multi-commodity instances with TYPE_CONFLICT sections (5–100% conflict density)
+├── SDVRPTW/
+├── SDVRPTW(M)/
+└── SDVRPTW(M-5-100)/
+    └── 100_customer/
+        ├── 100_customer_30/
+        ├── 100_customer_50/
+        └── 100_customer_100/
 ```
 
-The instances are derived from the Solomon VRPTW benchmarks (`c1xx`, `c2xx`, ...), augmented with demands, commodity types, and incompatibility pairs.
+Instances are derived from Solomon VRPTW classes and augmented with delivery demand, commodity types, and commodity-incompatibility pairs.
 
-## 4. Instance Format
+### Extended instance format
 
-Instances extend the CVRPLIB text format:
-
-```
+```text
 NAME : C101
 TYPE : SDVRPTW
 DIMENSION : 101
@@ -83,14 +98,14 @@ NODE_COORD_SECTION
 1 40 50
 ...
 DEMAND_SECTION
-1 0 0            <- node, demand, commodity type
+1 0 0
 2 10 3
 ...
-TYPE_CONFLICT    <- optional section: incompatible commodity-type pairs
+TYPE_CONFLICT
 2 5
 4 6
 TIME_WINDOW_SECTION
-1 0 1236         <- node, earliest, latest
+1 0 1236
 ...
 SERVICE_TIME_SECTION
 1 0
@@ -101,70 +116,159 @@ DEPOT_SECTION
 EOF
 ```
 
-Commodity types are integers in `{1, ..., 6}` (0 = depot). Each `TYPE_CONFLICT` line declares one incompatible pair; the section ends at `TIME_WINDOW_SECTION`.
+Each demand record contains the node ID, demand, and commodity type. Commodity type `0` is reserved for the depot. Each line in `TYPE_CONFLICT` declares a pair of commodity types that cannot share a vehicle.
 
-## 5. Building
+## 4. Building on Windows
 
-Requires a **C++17** compiler. The code is developed and tested on **Windows with MSVC** (Visual Studio):
+The source requires a C++17 compiler. The tested build environment is Windows x64 with MSVC.
+
+Open **x64 Native Tools Command Prompt for Visual Studio**, then run:
 
 ```powershell
-cl /std:c++17 /O2 /EHsc *.cpp /Fe:hgs.exe
+cd Program
+cl /std:c++17 /O2 /EHsc /MT /DNOMINMAX *.cpp /Fe:rlhgs.exe /link Psapi.lib
 ```
 
-> Note: `main.cpp` currently includes Windows headers (`windows.h`); on Linux/macOS, remove these includes (and the Windows-only `CreateFolder`/`IterateFolder` helpers) and compile with `g++ -std=c++17 -O3 *.cpp -o hgs`.
+This produces:
 
-## 6. Usage
-
-```
-./hgs instancePath solPath [options]
+```text
+Program\rlhgs.exe
 ```
 
-Example:
+The `/MT` option links the release MSVC runtime statically. Debug builds and Debug runtime libraries should not be used for computational experiments.
 
+## 5. Running the solver
+
+General syntax:
+
+```text
+rlhgs.exe <instance.vrp> <solution.sol> [option value] ...
 ```
-./hgs ../Instances/SDVRPTW(M-5-100)/100_customer/100_customer_100/c101.vrp solution.sol -t 600 -seed 0
+
+### Formal configuration
+
+The formal configuration used for the reported experiments is:
+
+```powershell
+.\rlhgs.exe `
+  ".\Instances\SDVRPTW(M-5-100)\100_customer\100_customer_100\c101.vrp" `
+  ".\output\c101_seed2026.sol" `
+  -variant A6 `
+  -splitStrategy CURRENT_RLHGS `
+  -seed 2026 `
+  -t 600 `
+  -warmFraction 0.5 `
+  -warmLegacyFraction 0 `
+  -warmInitialInfeasibleRepair 0 `
+  -drTrigger 500 `
+  -drRemovalRatio 0.15 `
+  -searchGuide OFFICIAL `
+  -log 1
 ```
 
-In the current driver (`main.cpp`), the program is invoked with two arguments — the instance path and the output-solution path; the solver parameters (`-t 600`, `-nbGranular 30`, `-it 40000`, ...) are set in `solve_vrp_instance()` and can be adjusted there.
+Options are parsed from left to right. `-variant A6` configures an ablation preset and may change the split preset, so `-splitStrategy CURRENT_RLHGS` must appear **after** `-variant A6` in the formal command.
 
-| Option | Meaning | Default |
-|---|---|---|
-| `-t <double>` | Time limit in seconds (runs iteratively until reached) | 0 (off) |
-| `-it <int>` | Max iterations without improvement | 20,000 |
-| `-seed <int>` | Random seed (0 = not fixed) | 0 |
-| `-veh <int>` | Prescribed fleet size | unlimited |
-| `-round <0/1>` | Round distances to integer | 1 |
-| `-log <0/1>` | Verbose log | 1 |
-| `-nbGranular <int>` | Granular neighborhood size Γ for RI moves | 20 |
-| `-mu <int>` | Minimum population size | 25 |
-| `-lambda <int>` | Generation size | 40 |
-| `-nbElite <int>` | Number of elite individuals | 5 |
-| `-nbClose <int>` | Closest individuals for diversity contribution | 4 |
-| `-nbIterTraces <int>` | Iterations between log traces | 500 |
-| `-nbIterPenaltyManagement <int>` | Iterations between penalty updates | 100 |
-| `-targetFeasible <double>` | Target ratio of feasible individuals | 0.2 |
-| `-penaltyIncrease / -penaltyDecrease <double>` | Adaptive penalty factors | 1.2 / 0.85 |
+For the capacity-30 instances, the executable checks the original demands before starting the no-split warm phase. When an original demand exceeds capacity, the expected log entry is:
+
+```text
+[WARM-START] enabled=0 reason=ORIGINAL_DEMAND_EXCEEDS_CAPACITY ...
+```
+
+The complete 600-second budget is then used by the split-enabled search.
+
+### Main command-line options
+
+| Option | Description | Code default | Formal value |
+|---|---|---:|---:|
+| `-t <seconds>` | Global search time limit | `0` | `600` |
+| `-seed <integer>` | Reproducible random seed | `0` | experiment seed |
+| `-variant <A0..A6>` | Reproducible algorithm/ablation preset | `CUSTOM` | `A6` |
+| `-splitStrategy <name>` | Demand-splitting representation | `CURRENT_RLHGS` | `CURRENT_RLHGS` |
+| `-warmFraction <ratio>` | Fraction of the global budget assigned to the no-split warm phase when feasible | `0.10` | `0.50` |
+| `-warmLegacyFraction <ratio>` | Fraction of warm time using legacy integer decision guidance | unspecified | `0` |
+| `-warmInitialInfeasibleRepair <0/1>` | Enable the legacy initial infeasible-repair path | `0` | `0` |
+| `-alns <0/1>` | Enable adaptive large-neighborhood search | `0` | enabled by A6 |
+| `-rl <0/1>` | Enable successor-learning guidance | `1` | `1` |
+| `-drTrigger <iterations>` | Stagnation threshold for destroy--repair; `0` disables it | `0` | `500` |
+| `-drRemovalRatio <ratio>` | Fraction of original-customer blocks removed by destroy--repair | `0.15` | `0.15` |
+| `-searchGuide <mode>` | Search guidance: `OFFICIAL` or `INTEGER_SURROGATE` | `OFFICIAL` | `OFFICIAL` |
+| `-it <iterations>` | Iterations without improvement before restart/termination logic | `20000` | `20000` |
+| `-log <0/1>` | Print search traces and diagnostics | `1` | `1` |
+
+Other HGS population, penalty, split-diagnostic, dynamic-diagnostic, and audit options are listed by the help output in `Program/commandline.h`.
+
+## 6. Distance, feasibility, and validation
+
+The official edge distance and travel time are computed as:
+
+```text
+round(sqrt((x_i-x_j)^2 + (y_i-y_j)^2) * 100) / 100
+```
+
+The official objective is always the sum of these two-decimal Euclidean route distances. The final independent validator checks:
+
+- exact total delivery to every original customer;
+- no overdelivery or underdelivery;
+- strictly positive delivered quantities;
+- vehicle capacity;
+- hard customer and depot time windows;
+- service-time propagation;
+- commodity incompatibility;
+- no duplicate visit to the same original customer within one route;
+- route structure and depot feasibility; and
+- agreement between stored and recomputed objective values.
+
+A run should be treated as valid only when the final log reports `Validator=PASS`.
 
 ## 7. Output
 
-The best solution is written to the solution file in the form
+The `.sol` file records original-customer IDs and delivered quantities:
 
+```text
+Route #1: 32(30) 33(40) 30(10)
+Route #2: 18(20) 41(30)
+Cost 1494.49
 ```
-Route #1: 5 13 27 ...
-Route #2: 8 21 40 ...
-Cost 1234.5
+
+The console output includes live HGS traces and machine-readable summaries, including:
+
+```text
+[VALIDATOR-COST] ... validator=PASS
+[RUN-SUMMARY] ... Validator=PASS SearchRuntime=...
+[DR-SUMMARY] DRTriggers=... DRSuccessfulRuns=... DRSkippedNoFeasibleParent=...
+[CURRENT-DR-RESULT] BestCost=... Routes=... SplitCustomers=... Validator=PASS ...
+RESULT,<instance>,<variant>,<seed>,<feasible>,<cost>,...
 ```
 
-For split-delivery runs, the console log additionally reports, per route, each (virtual) customer with its delivered quantity and any time-window violation, mapping virtual customers back to their original customer IDs.
+All search work, including warm start, HGS, ALNS, destroy--repair, local search, and validation associated with solution production, is accounted for within the same global time budget.
 
-## 8. Citation
+## 8. Read-only reevaluation of historical solutions
 
-If you use this code in your research, please cite our paper:
+An existing `.sol` file can be reevaluated without running any optimization:
 
-> *(Paper under review — citation information will be added upon publication.)*
+```powershell
+.\rlhgs.exe ".\Instances\path\c101.vrp" ".\output\unused.sol" `
+  -reevaluateSolution ".\old_solution.sol"
+```
 
-## 9. Acknowledgments & License
+This mode reconstructs the routes, recomputes the official two-decimal objective, runs the current validator, prints the diagnostic result, and exits without modifying or improving the supplied solution.
 
-This project is built upon the **HGS-CVRP** implementation by Thibaut Vidal (MIT License); the original license headers are retained in the corresponding source files. The PASA splitting scheme is adapted from Torkzaban et al. (2024), and the constructive heuristic from Penna et al. (2013).
+## 9. Reproducibility notes
 
-This code is released under the **MIT License**.
+- Use a Release x64 executable.
+- Keep the complete command line, executable hash, instance files, seed, and log for every run.
+- The formal repeated experiments use deterministic seeds; the published experimental package uses seeds `2026` through `2035` where ten repetitions are required.
+- Do not replace the official two-decimal objective or official double-precision time-window propagation with an integer surrogate when reporting final results.
+- Do not count a run as complete unless its independent validator reports `PASS`.
+
+## 10. Citation
+
+If you use this implementation, please cite the accompanying paper. Full bibliographic information will be added after publication.
+
+## 11. Acknowledgments and license
+
+This implementation builds on the HGS-CVRP framework by Thibaut Vidal:
+
+- [vidalt/HGS-CVRP](https://github.com/vidalt/HGS-CVRP)
+
+The inherited source files retain their original MIT license notices. This repository is distributed under the terms of the [MIT License](LICENSE).
